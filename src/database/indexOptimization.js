@@ -143,15 +143,20 @@ export function buildHistoryId(partitionId, timestamp) {
   return normalizedPartitionId * HISTORY_PARTITION_MULTIPLIER + formatHistoryTimeKey(timestamp);
 }
 
+export async function getServerHistoryInfo(db, serverId, server = null) {
+  const target = server && server.id === serverId
+    ? server
+    : (await getAllServers(db, true)).find(s => s.id === serverId);
 
-export async function getServerHistoryPartitionId(db, serverId) {
-  const servers = await getAllServers(db, true);
-  const server = servers.find(s => s.id === serverId);
-  if (!server) {
+  if (!target) {
     debug(`Server ${serverId} not found`);
     throw new Error(`Server ${serverId} not found`);
   }
-  return server.history_partition_id;
+
+  return {
+    partitionId: normalizeHistoryPartitionId(target.history_partition_id),
+    startTimestamp: normalizeHistoryTimestamp(target.timestamp, 0)
+  };
 }
 
 export function getHistoryIdRange(partitionId, startTimestamp = null, endTimestamp = null) {

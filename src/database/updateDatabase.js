@@ -62,6 +62,23 @@ export async function ensureHistoryIndex(db) {
       return { success: true, created: false, message: '索引已存在' };
     }
 
+    // 获取最小id
+     const minId = await db.prepare(`
+      SELECT id AS min_id
+      FROM metrics_history
+      ORDER BY id ASC
+      LIMIT 1
+    `).first();
+
+    if (!minId || minId.min_id > 10000000000000) {
+      debug('metrics_history 表为空或已优化，无需创建索引');
+      return {
+        success: true,
+        created: false,
+        message: 'metrics_history 表为空或已优化，无需创建索引'
+      };
+    }
+
     const idxName = 'idx_history_server_time_' + Math.random().toString(36).substring(2);
     await db.prepare(`DROP INDEX IF EXISTS ${idxName}`).run();
     await db.prepare(`

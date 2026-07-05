@@ -1,6 +1,6 @@
 import { checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getLatestMetricsForAllServers } from '../database/schema.js';
-import { getAllServers, clearServersListCache, clearServerDetailCache } from '../utils/cache.js';
+import { getAllServers, clearServersListCache } from '../utils/cache.js';
 import { clearSiteSettingsCache, saveSiteOptions } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
@@ -426,7 +426,6 @@ export async function handleAdminAPI(request, env, sys) {
       await deleteServer(env.DB, id);
       
       clearServersListCache();
-      clearServerDetailCache(id);
       
       return createSuccessResponse({ 
         success: true, 
@@ -493,7 +492,6 @@ export async function handleAdminAPI(request, env, sys) {
       }
       
       clearServersListCache();
-      clearServerDetailCache(id);
       
       return createSuccessResponse({ 
         success: true, 
@@ -517,9 +515,6 @@ export async function handleAdminAPI(request, env, sys) {
       }
       
       clearServersListCache();
-      for (const id of ids) {
-        clearServerDetailCache(id);
-      }
       
       return createSuccessResponse({ 
         success: true, 

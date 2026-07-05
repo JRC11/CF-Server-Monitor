@@ -30,6 +30,10 @@ function normalizeTimestamp(value, fallback = Date.now()) {
   return ts < 10000000000 ? ts * 1000 : ts;
 }
 
+function logUpdateBadRequest(reason, details = {}) {
+  console.warn('[Update] 400 Bad Request:', reason, details);
+}
+
 function normalizeMetricSamples(data) {
   const now = Date.now();
   const rawSamples = Array.isArray(data.samples)
@@ -140,11 +144,21 @@ export async function handleUpdate(request, env, ctx) {
     // 从缓存中获取历史记录分区 ID
     const historyPartitionId = serverDetail.history_partition_id;
     if(!historyPartitionId) {
+      logUpdateBadRequest('Missing history_partition_id', {
+        id,
+        history_partition_id: serverDetail.history_partition_id
+      });
       return createBadRequestResponse('Missing history_partition_id');
     }
 
     const samples = normalizeMetricSamples(data);
     if (samples.length === 0) {
+      logUpdateBadRequest('Missing metrics', {
+        id,
+        has_metrics: !!data.metrics,
+        has_samples: Array.isArray(data.samples),
+        has_batch: Array.isArray(data.batch)
+      });
       return createBadRequestResponse('Missing metrics');
     }
 

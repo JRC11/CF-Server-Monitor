@@ -110,7 +110,7 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
   
   let data;
   try {
-    data = await getMetricsHistory(env.DB, id, clampedHours, columns);
+    data = await getMetricsHistory(env.DB, id, clampedHours, columns, server);
   } catch (e) {
     const message = e && e.message ? e.message : String(e);
     if (/no such column/i.test(message)) {

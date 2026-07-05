@@ -2,19 +2,16 @@
  * 缓存管理模块
  * 集中管理所有内存缓存，包括：
  * - 服务器列表缓存
- * - 服务器详情缓存（统一替代 SELECT 1/id/*）
+ * - 服务器详情（复用服务器列表缓存）
  * - 最新指标缓存
  * - 历史指标缓存
  * - 站点设置缓存
  */
 
-import { clearSiteSettingsCache } from './settings.js';
+import { clearSiteSettingsCache, debug } from './settings.js';
 
 const SERVERS_LIST_TTL = 60 * 1000;
 let serversListCache = null;
-
-const SERVER_DETAIL_TTL = 5 * 60 * 1000;
-const serverDetailCache = new Map();
 
 const LATEST_ALL_TTL = 30 * 1000;
 let latestAllCache = null;
@@ -39,6 +36,7 @@ export async function getAllServers(db, includeHidden = true) {
   const now = Date.now();
   
   if (serversListCache && serversListCache.cacheKey === cacheKey && now - serversListCache.time < SERVERS_LIST_TTL) {
+    debug('服务器列表缓存命中');
     return serversListCache.data;
   }
 
@@ -49,9 +47,10 @@ export async function getAllServers(db, includeHidden = true) {
     }
     const { results } = await db.prepare(query).all();
     serversListCache = { data: results, time: now, cacheKey };
+    debug('服务器列表缓存更新');
     return results;
   } catch (e) {
-    console.error('获取服务器列表失败:', e);
+    debug('获取服务器列表失败:', e);
     return serversListCache && serversListCache.cacheKey === cacheKey ? serversListCache.data : [];
   }
 }
@@ -60,56 +59,16 @@ export function clearServersListCache() {
   serversListCache = null;
 }
 
-/**
- * 获取单个服务器详情（带缓存）
- * @param {object} db - 数据库实例
- * @param {string} id - 服务器 ID
- * @param {boolean} [includeHidden=false] - 是否包含隐藏服务器
- * @returns {object|null} 服务器对象，不存在返回 null
- */
+
 export async function getServerDetail(db, id, includeHidden = false) {
-  const now = Date.now();
-  const cached = serverDetailCache.get(id);
-
-  if (cached && now - cached.timestamp < SERVER_DETAIL_TTL) {
-    const server = cached.data;
-    if (!includeHidden && (server.is_hidden === '1' || server.is_hidden === 1)) {
-      return null;
-    }
-    return server;
-  }
-
-  let query = 'SELECT * FROM servers WHERE id = ?';
-  if (!includeHidden) {
-    query += " AND (is_hidden != '1' AND is_hidden != 1)";
-  }
-
-  const server = await db.prepare(query).bind(id).first();
-
-  if (server) {
-    serverDetailCache.set(id, { data: server, timestamp: now });
-  }
-
-  return server;
+  const servers = await getAllServers(db, includeHidden);
+  const server = servers.find(item => item.id === id);
+  return server ? { ...server } : null;
 }
 
-/**
- * 检查服务器是否存在（复用服务器详情缓存）
- * @param {object} db - 数据库实例
- * @param {string} id - 服务器 ID
- * @returns {boolean} 服务器是否存在
- */
 export async function checkServerExists(db, id) {
   const server = await getServerDetail(db, id, true);
   return !!server;
-}
-
-/**
- * 清除单个服务器的详情缓存
- * @param {string} id - 服务器 ID
- */
-export function clearServerDetailCache(id) {
-  serverDetailCache.delete(id);
 }
 
 /**
@@ -155,7 +114,6 @@ export function clearMetricsHistoryCache(serverId) {
 
 export function clearAllCaches() {
   clearServersListCache();
-  serverDetailCache.clear();
   clearLatestMetricsCache();
   metricsHistoryCache.clear();
   clearSiteSettingsCache();

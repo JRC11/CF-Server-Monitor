@@ -1,13 +1,6 @@
-import { 
-  getAllServers,
-  getLatestMetricsCache, 
-  setLatestMetricsCache,
-  getMetricsHistoryCache,
-  setMetricsHistoryCache,
-  getCacheDuration
-} from '../utils/cache.js';
+import { getAllServers, getLatestMetricsCache, setLatestMetricsCache, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from '../utils/cache.js';
 import { saveSiteOptions, debug, getSettingByKey } from '../utils/settings.js';
-import { ensureServerOptimization, buildHistoryId, getServerHistoryPartitionId, getHistoryIdRange } from './indexOptimization.js';
+import { ensureServerOptimization, buildHistoryId, getServerHistoryInfo, getHistoryIdRange } from './indexOptimization.js';
 import { addHistoryColumns, ensureHistoryIndex } from './updateDatabase.js';
 
 let dbInitialized = false;
@@ -18,12 +11,19 @@ export async function initDatabase(db) {
   debug('初始化数据库');
   
   try {
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY, 
-        value TEXT
-      )
-    `).run();
+    const SettingTableExists = await db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='settings'
+    `).first();
+    if (!SettingTableExists) {
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS settings (
+          key TEXT PRIMARY KEY, 
+          value TEXT
+        )
+      `).run();
+      await saveSiteOptions(db, { servers_optimized: 'true' });
+      await saveSiteOptions(db, { history_id_optimized: 'true' });
+    }
 
     // 判断servers表是否存在
     const ServerTableExists = await db.prepare(`
@@ -50,7 +50,6 @@ export async function initDatabase(db) {
           timestamp INTEGER DEFAULT 0
         )
       `).run();
-      await saveSiteOptions(db, { servers_optimized: 'true' });
     } else {
       debug('检查servers表优化状态');
       await ensureServerOptimization(db);
@@ -103,10 +102,9 @@ export async function initDatabase(db) {
           net_tx_monthly REAL DEFAULT 0
         )
       `).run();
-      await saveSiteOptions(db, { history_id_optimized: 'true' });
+    }else{
+      await ensureHistoryIndex(db);
     }
-    
-    await ensureHistoryIndex(db);
 
     debug('✅ 数据库初始化完成');
     dbInitialized = true;
@@ -151,7 +149,7 @@ export async function rebuildDatabase(db) {
   }
 }
 
-export async function getMetricsHistory(db, serverId, hours, columns) {
+export async function getMetricsHistory(db, serverId, hours, columns, server = null) {
   const now = Date.now();
   const cacheDuration = getCacheDuration(hours);
   
@@ -184,6 +182,8 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
   }
 
   const cutoff = now - queryHours * 60 * 60 * 1000;
+  const historyInfo = await getServerHistoryInfo(db, serverId, server);
+  const queryStart = Math.max(cutoff, historyInfo.startTimestamp);
 
   debug(
     '[History]',
@@ -191,15 +191,16 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
     'hours:', hours,
     'queryHours:', queryHours,
     'interval:', intervalMs,
-    'cutoff:', new Date(cutoff).toISOString()
+    'cutoff:', new Date(cutoff).toISOString(),
+    'start:', new Date(queryStart).toISOString()
   );
 
   // 判断是否需要查询 metrics_history_old 表
-  // 如果 cutoff 早于本周日 00:00 UTC（表轮换时间），说明需要查旧表
+  // 如果实际查询起点早于本周日 00:00 UTC（表轮换时间），说明需要查旧表
   const nowDate = new Date(now);
   const day = nowDate.getUTCDay();
   const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
-  const needOldTable = cutoff < thisSunday.getTime();
+  const needOldTable = queryStart < thisSunday.getTime();
   
   const oldTableExists = needOldTable && !!await db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
@@ -209,8 +210,11 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
 
   const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
   if (history_id_optimized) {
-    const partitionId = await getServerHistoryPartitionId(db, serverId);
-    const { startId, endId } = getHistoryIdRange(partitionId, cutoff);
+    if (!historyInfo.partitionId) {
+      throw new Error('Invalid history partition id');
+    }
+
+    const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, queryStart);
 
     if (oldTableExists) {
       debug('[History] 跨周查询，合并 metrics_history 和 metrics_history_old');
@@ -290,7 +294,7 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
         SELECT timestamp, ${columns}
         FROM sampled
         WHERE rn = 1
-      `).bind(intervalMs, serverId, cutoff, serverId, cutoff).all();
+      `).bind(intervalMs, serverId, queryStart, serverId, queryStart).all();
     } else {
       // 单表查询
       rawResult = await db.prepare(`
@@ -310,7 +314,7 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
         SELECT timestamp, ${columns}
         FROM sampled
         WHERE rn = 1
-      `).bind(intervalMs, serverId, cutoff).all();
+      `).bind(intervalMs, serverId, queryStart).all();
     }
   }
 
@@ -335,6 +339,17 @@ export async function weeklyCleanup(db) {
     
     await saveSiteOptions(db, { cleanup_skip_count: '1' });
     debug('cleanup_skip_count set to 1');
+
+    // 判断metrics_history有无索引
+    const index = await db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='metrics_history'`
+    ).first();
+    if(!index){
+      await saveSiteOptions(db, { history_id_optimized: 'true' });
+      debug('✅ 切换到优化模式');
+    }else{
+      debug('✅ 继续兼容模式');
+    }
     
     // 1. 删除旧的 metrics_history_old 表（如果存在）
     await db.prepare(`DROP TABLE IF EXISTS metrics_history_old`).run();
@@ -460,11 +475,15 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
   }
 }
 
-export async function getLatestMetrics(db, serverId) {
+export async function getLatestMetrics(db, serverId, server = null) {
   try {
-    const partitionId = await getServerHistoryPartitionId(db, serverId);
+    const historyInfo = await getServerHistoryInfo(db, serverId, server);
+    if (!historyInfo.partitionId) {
+      throw new Error('Invalid history partition id');
+    }
 
-    const { startId, endId } = getHistoryIdRange(partitionId);
+    const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
+    const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
     debug(`Server ${serverId} history_id_range: ${startId} - ${endId}`);
     const  result = await db.prepare(`
       SELECT * FROM metrics_history
@@ -495,7 +514,7 @@ export async function getLatestMetricsForAllServers(db) {
 
     const entries = await Promise.all(
       servers.map(s =>
-        getLatestMetrics(db, s.id).then(metrics => [s.id, metrics])
+        getLatestMetrics(db, s.id, s).then(metrics => [s.id, metrics])
       )
     );
 
